@@ -1,0 +1,17 @@
+# Never commit personal Anki data or credentials
+*.anki2
+*.anki2-*
+.ankiauth.json
+.undo.json
+collection.media/
+collection.media.db2*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+*.swp
