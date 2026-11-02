@@ -27,7 +27,6 @@ from anki.sync import SyncAuth
 DATA_DIR = os.environ.get("ANKI_CLI_DIR") or os.path.expanduser("~/.local/share/anki-cli")
 COL_PATH = os.path.join(DATA_DIR, "collection.anki2")
 AUTH_PATH = os.path.join(DATA_DIR, ".ankiauth.json")
-UNDO_PATH = os.path.join(DATA_DIR, ".undo.json")
 
 
 def save_auth(auth: SyncAuth) -> None:
@@ -58,8 +57,6 @@ def full_sync(col: Collection, auth: SyncAuth, upload: bool) -> None:
     # server_usn=None skips the background media sync we don't use
     col.full_upload_or_download(auth=auth, server_usn=None, upload=upload)
     col.reopen(after_full_sync=True)
-    if os.path.exists(UNDO_PATH):
-        os.remove(UNDO_PATH)  # a one-way sync invalidates any undo snapshot
     print("done.")
 
 
