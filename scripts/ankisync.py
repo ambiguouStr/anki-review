@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 from anki.collection import Collection
 from anki.errors import NetworkError, SyncError, SyncErrorKind
@@ -27,6 +28,8 @@ from anki.sync import SyncAuth
 DATA_DIR = os.environ.get("ANKI_CLI_DIR") or os.path.expanduser("~/.local/share/anki-cli")
 COL_PATH = os.path.join(DATA_DIR, "collection.anki2")
 AUTH_PATH = os.path.join(DATA_DIR, ".ankiauth.json")
+STARTUP_GRACE = 2.0  # seconds to wait for a media sync to report itself active
+BIDI_MARKS = dict.fromkeys(range(0x2066, 0x206A))  # Anki's i18n wraps numbers in these
 
 
 def save_auth(auth: SyncAuth) -> None:
@@ -60,6 +63,35 @@ def full_sync(col: Collection, auth: SyncAuth, upload: bool) -> None:
     print("done.")
 
 
+def sync_media(col: Collection, auth: SyncAuth) -> None:
+    """Download the deck's audio and images. Separate from the collection sync
+    and far larger, so it only runs when asked for. Progress is polled because
+    the backend does the transfer on its own thread."""
+    print("syncing media (Ctrl-C to stop; progress is kept)...")
+    col.sync_media(auth)
+    started = time.time()
+    running = False
+    try:
+        while True:
+            status = col.media_sync_status()
+            if status.active:
+                running = True
+            elif running or time.time() - started > STARTUP_GRACE:
+                break  # the backend syncs on its own thread and takes a moment to start
+            # these arrive already labelled and translated ("Checked: 1000"),
+            # wrapped in the bidi isolates Anki's i18n puts around numbers
+            p = status.progress
+            line = ", ".join(s.translate(BIDI_MARKS) for s in (p.checked, p.added, p.removed) if s)
+            if line:
+                print(f"\r  {line}", end="", flush=True)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        col.set_wants_abort()
+        print("\n  stopped; re-run --media to continue.")
+        return
+    print("\n  media up to date.")
+
+
 def summary(col: Collection) -> None:
     tree = col.sched.deck_due_tree()
     due = 0
@@ -78,6 +110,8 @@ def main() -> None:
                            help="resolve a sync conflict by taking AnkiWeb's copy (local unsynced reviews are lost)")
     direction.add_argument("--upload", action="store_true",
                            help="resolve a sync conflict by pushing the local copy (AnkiWeb-side changes are lost)")
+    ap.add_argument("--media", action="store_true",
+                    help="also download the deck's audio and images (large; off by default)")
     args = ap.parse_args()
 
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -117,6 +151,8 @@ def main() -> None:
                 sys.exit(2)
         else:
             sys.exit(f"unexpected sync state: {out}")
+        if args.media:
+            sync_media(col, auth)
         summary(col)
     except NetworkError as e:
         sys.exit(f"offline or AnkiWeb unreachable: {e}")

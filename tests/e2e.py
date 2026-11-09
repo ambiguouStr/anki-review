@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 from render import Media, clean, pitch_text, render_back  # noqa: E402
-from review import can_play_audio, terminal_shows_images  # noqa: E402
+from review import can_play_audio, japanese_voice, terminal_shows_images  # noqa: E402
 
 REAL = os.environ.get("ANKI_CLI_DIR") or os.path.expanduser("~/.local/share/anki-cli")
 REAL_COL = os.path.join(REAL, "collection.anki2")
@@ -165,6 +165,96 @@ def test_terminal_checks():
         check("ssh, no audio", not can_play_audio({"PATH": bin_dir, "SSH_CONNECTION": "1 2 3 4"}))
     finally:
         shutil.rmtree(bin_dir)
+
+
+def fake_players(box):
+    """mpv and `say` replaced by scripts that log what they were asked to play,
+    so tests can assert on sound without making any."""
+    bin_dir = os.path.join(box, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    log = os.path.join(box, "played.log")
+    with open(os.path.join(bin_dir, "mpv"), "w") as f:
+        f.write(f'#!/bin/sh\necho "mpv $*" >> {log}\n')
+    with open(os.path.join(bin_dir, "say"), "w") as f:
+        f.write('#!/bin/sh\n'
+                'if [ "$1" = "-v" ] && [ "$2" = "?" ]; then\n'
+                '  echo "Kyoko               ja_JP    # hello"\n'
+                '  exit 0\n'
+                'fi\n'
+                f'echo "say $*" >> {log}\n')
+    for name in ("mpv", "say"):
+        os.chmod(os.path.join(bin_dir, name), 0o755)
+    return {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}, log
+
+
+def played(log):
+    if not os.path.exists(log):
+        return []
+    with open(log) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def download_media(box):
+    media = os.path.join(box, "collection.media")
+    os.makedirs(media, exist_ok=True)
+    db = sqlite3.connect(os.path.join(box, "collection.anki2"))
+    for (fields,) in db.execute("select flds from notes"):
+        for name in re.findall(r"\[sound:([^\]]+)\]", fields):
+            open(os.path.join(media, name), "w").close()
+    db.close()
+    return media
+
+
+def test_audio(box):
+    fresh(box)
+    check("no say, no speech", japanese_voice({"PATH": "/nonexistent"}) == ())
+
+    env, log = fake_players(box)
+    # the fake players are shell scripts appending to a log, so they need a
+    # beat longer than a real player would before the session tears them down
+    flip = [(" ", 0.6), ("q", 0.6)]
+
+    # nothing downloaded: the reading field is spoken rather than guessed from kanji
+    _, out, _ = tty_session(flip, "--no-sync", box=box, env=env)
+    spoken = [line for line in played(log) if line.startswith("say ")]
+    check("no recordings: the reading is synthesised", spoken, out[-300:])
+    check("speech uses a Japanese voice", spoken and spoken[0].startswith("say -v Kyoko "), spoken)
+    check("kanji is never fed to the synthesiser",
+          spoken and not any("一" <= ch <= "鿿" for ch in spoken[0]), spoken)
+    check("r replay hint offered", "r replay" in out, out[-300:])
+
+    # with recordings on disk, the real player takes over and both cues are offered
+    if os.path.exists(log):
+        os.remove(log)
+    media = download_media(box)
+    _, out, _ = tty_session(flip, "--no-sync", box=box, env=env)
+    lines = played(log)
+    check("recordings play through the audio player",
+          lines and lines[0].startswith("mpv ") and lines[0].endswith(".mp3"), lines)
+    check("recordings beat speech", not any(line.startswith("say ") for line in lines), lines)
+    check("word and sentence both offered", "r word" in out and "s sentence" in out, out[-300:])
+
+    # r and s replay without ending the screen, so neither can grade a card
+    if os.path.exists(log):
+        os.remove(log)
+    base = revlog(box)
+    _, out, _ = tty_session([(" ", 0.6), ("r", 0.6), ("s", 0.6), ("q", 0.6)],
+                            "--no-sync", box=box, env=env)
+    check("r and s replay", len(played(log)) == 3, played(log))
+    check("replaying never grades", revlog(box) == base, len(revlog(box)) - len(base))
+
+    if os.path.exists(log):
+        os.remove(log)
+    tty_session(flip, "--no-sync", "--no-audio", box=box, env=env)
+    check("--no-audio stays silent", played(log) == [], played(log))
+
+    if os.path.exists(log):
+        os.remove(log)
+    tty_session(flip, "--no-sync", box=box, env={**env, "SSH_CONNECTION": "1 2 3 4"})
+    check("ssh stays silent", played(log) == [], played(log))
+
+    shutil.rmtree(media)
+    shutil.rmtree(os.path.join(box, "bin"))
 
 
 def test_media_on_screen(box):
@@ -316,6 +406,7 @@ def main():
         test_render()
         test_terminal_checks()
         test_media_on_screen(box)
+        test_audio(box)
         test_review(box)
         test_sync(box)
         test_cli_edges(box, empty)

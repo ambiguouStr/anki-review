@@ -15,7 +15,9 @@ Scripts live in `scripts/` next to this file; let `S` be that directory. The col
 
 ## When asked to review
 
-Tell the user to run `ank` in a terminal or tmux pane (`ank 5` for five cards). Keys: space flips and then grades Good, 1-4 grade, `u` undoes, `q` quits. It syncs by itself. It needs a real terminal, so don't launch it from a tool call.
+Tell the user to run `ank` in a terminal or tmux pane (`ank 5` for five cards). Keys: space flips and then grades Good, 1-4 grade, `r`/`s` replay the word/sentence audio, `u` undoes, `q` quits. It syncs by itself. It needs a real terminal, so don't launch it from a tool call.
+
+Flipping a card plays its audio: the deck's own recording if media has been downloaded (`python3 $S/ankisync.py --media`), otherwise macOS `say` reading the card's reading field. `--no-audio` silences it. Audio never plays over SSH.
 
 ## Explaining failed cards
 

@@ -40,6 +40,12 @@ ANKI_USER='you@example.com' ANKI_PASS='...' python3 scripts/ankisync.py
 
 Data lives in `$ANKI_CLI_DIR` (default `~/.local/share/anki-cli/`). On first run with an empty local collection, AnkiWeb performs a full download automatically.
 
+Media is a separate, much larger transfer and stays off unless you ask for it:
+
+```bash
+python3 scripts/ankisync.py --media   # audio and images; Ctrl-C is safe, progress is kept
+```
+
 > **Security:** keep your real data directory *outside* any git checkout. The bundled `.gitignore` also excludes `*.anki2`, `.ankiauth.json`, and media, so an accidental copy into the repo won't be committed.
 
 ## Usage
@@ -49,6 +55,7 @@ ank                    # 10 cards, then offer another batch
 ank 5                  # batch of 5 (0 = no limit)
 ank --deck "My Deck"   # pin to one deck
 ank --no-sync          # skip the automatic sync
+ank --no-audio         # stay silent on the card back
 ank --stats            # due counts per deck
 ank --recent-fails     # cards you pressed Again on in the past two days
 ```
@@ -57,11 +64,20 @@ ank --recent-fails     # cards you pressed Again on in the past two days
 | --- | --- |
 | `space` / `enter` | flip, then grade Good |
 | `1` `2` `3` `4` | Again / Hard / Good / Easy |
+| `r` / `s` | replay the word / play the sentence, when the back has audio |
 | `u` | undo the previous grade, at any point in the session |
 | `j` / `k` | scroll a card taller than the window |
 | `q` | quit |
 
-The back always shows everything on the note, including fields the card template hides, such as pitch accent (`ア↗ナ↘タ (起伏)`) and frequency. `ank` doesn't render images or play audio. A `[image: file]` or `[audio: file]` marker appears only when the file is in `collection.media` (it isn't downloaded by default) and the terminal could use it: an image protocol outside tmux, or `mpv`, `ffplay` or `afplay` outside SSH. Otherwise media leaves no trace.
+The back always shows everything on the note, including fields the card template hides, such as pitch accent (`ア↗ナ↘タ (起伏)`) and frequency.
+
+### Sound
+
+Flipping a card plays its audio, and `r` replays it. One sound plays at a time, in a child process, so a long recording never ties up the keyboard.
+
+What you hear depends on what's on disk. With the deck's recordings downloaded (`ankisync.py --media`), `ank` plays them through `mpv`, `ffplay` or `afplay` — whichever it finds first — and `s` plays the example sentence. Without them it falls back to macOS `say` with a Japanese voice, reading the note's *reading* field: a card's kana is the only thing safe to synthesise, since handing kanji to a speech engine makes it guess the very reading the card is testing (開く is あく on one card and ひらく on another).
+
+Nothing plays over SSH, where the sound would come out of the wrong machine, and `--no-audio` turns it off entirely. Images still aren't rendered: an `[image: file]` or `[audio: file]` marker appears only when the file is in `collection.media` and the terminal could use it — an image protocol outside tmux, a player outside SSH. Otherwise media leaves no trace.
 
 `ank` syncs when it starts and again on exit if you graded anything. Any key skips a slow sync, and grades are always saved locally first, so working offline is fine. On a divergent sync it tells you, and you choose by running `scripts/ankisync.py --download` (AnkiWeb wins) or `--upload` (local wins).
 
