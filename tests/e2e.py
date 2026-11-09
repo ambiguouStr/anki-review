@@ -143,6 +143,15 @@ def test_render():
         "<div>a</div><img src='i.webp'>", {"Picture": "<img src='i.webp'>", "Word Audio": "[sound:a.mp3]"},
         Media(image=lambda n: True, audio=lambda n: True))
         == "a\n[image: i.webp]\nWord Audio: [audio: a.mp3]")
+    check("cloze markup isn't repeated under the answer", render_back(
+        "留学するにあたって、ビザの手続きをした。",
+        {"Text": "留学する{{c1::にあたって}}、ビザの手続きをした。",
+         "Back Extra": "N2 · formal"})
+        == "留学するにあたって、ビザの手続きをした。\nBack Extra: N2 · formal")
+    check("cloze hints are stripped too", render_back(
+        "彼は医者として働いている。",
+        {"Text": "彼は医者{{c1::として::role}}働いている。"})
+        == "彼は医者として働いている。")
     check("back adds only what the template hid",
           back == "父(ちち)\nfather\nFrequency: 681\nPitch Accent: チ↗チ↘ (起伏)", back)
 
