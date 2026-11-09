@@ -8,12 +8,14 @@ Usage:
   ank 5                 # batch of 5 (0 = no limit)
   ank --deck "Name"     # pin the session to one deck
   ank --no-sync         # skip the automatic AnkiWeb sync
+  ank --no-audio        # stay silent on the card back
   ank --stats [--json]  # due counts per deck
   ank --recent-fails [--json]  # cards you recently pressed Again on
 
 Keys:
   space/enter  flip, then grade Good
   1/2/3/4      Again / Hard / Good / Easy
+  r/s          replay the word / play the sentence, when the back has audio
   u            undo the previous grade (any time)
   j/k          scroll, when the card is taller than the window
   q            quit
@@ -30,6 +32,7 @@ import termios
 import time
 import tty
 import unicodedata
+from typing import NamedTuple
 
 from anki.collection import Collection  # must come first: anki.cards alone hits a circular import
 from anki.decks import DeckId
@@ -63,6 +66,15 @@ RESET = "\x1b[0m"
 IMAGE_TERMINALS = ("kitty", "iterm.app", "wezterm", "ghostty")
 # paplay, pw-play and aplay are absent here on purpose: decks ship mp3
 AUDIO_PLAYERS = ("mpv", "ffplay", "afplay")
+# every one of these must play and exit on its own, with no window and no chatter
+PLAYER_FLAGS = {
+    "mpv": ("--no-video", "--really-quiet"),
+    "ffplay": ("-nodisp", "-autoexit", "-loglevel", "quiet"),
+    "afplay": (),
+}
+# a field whose name says it holds a reading is the only safe thing to synthesise:
+# feeding kanji to a speech engine guesses the very reading the card is testing
+READING_FIELDS = ("reading", "kana", "furigana", "読み", "よみ")
 
 JSON_MODE = False
 
@@ -85,9 +97,13 @@ def terminal_shows_images(env) -> bool:
                 or any(t in name.lower() for t in IMAGE_TERMINALS for name in names))
 
 
-def can_play_audio(env) -> bool:
+def is_remote(env) -> bool:
     """Over SSH a local player would make its sound on the remote machine."""
-    if env.get("SSH_CONNECTION") or env.get("SSH_TTY"):
+    return bool(env.get("SSH_CONNECTION") or env.get("SSH_TTY"))
+
+
+def can_play_audio(env) -> bool:
+    if is_remote(env):
         return False
     return any(shutil.which(player, path=env.get("PATH")) for player in AUDIO_PLAYERS)
 
@@ -104,6 +120,76 @@ def media_support() -> Media:
 
     return Media(image=lambda name: images and local(name),
                  audio=lambda name: audio and local(name))
+
+
+def japanese_voice(env) -> tuple:
+    """macOS `say` with a Japanese voice, for decks whose audio isn't downloaded.
+    Asking `say` is the only way to know a voice is actually installed."""
+    if not shutil.which("say", path=env.get("PATH")):
+        return ()
+    try:
+        listing = subprocess.run(["say", "-v", "?"], capture_output=True, text=True,
+                                 timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    voices = [line.split()[0] for line in listing.splitlines() if "ja_JP" in line]
+    if not voices:
+        return ()
+    # Kyoko is the long-standing default; anything ja_JP beats nothing
+    voice = "Kyoko" if "Kyoko" in voices else voices[0]
+    return ("say", "-v", voice)
+
+
+class Sound(NamedTuple):
+    """A recording to play, or text to synthesise when there is no recording."""
+    path: str = ""
+    text: str = ""
+
+
+class Player:
+    """Plays one sound at a time in a child process, so a long recording never
+    blocks the keyboard. Starting a sound stops whatever was already playing."""
+
+    def __init__(self, env=None, enabled: bool = True):
+        env = os.environ if env is None else env
+        self.command = ()
+        self.speech = ()
+        self.proc = None
+        if not (enabled and sys.stdout.isatty() and not is_remote(env)):
+            return
+        for name in AUDIO_PLAYERS:
+            if shutil.which(name, path=env.get("PATH")):
+                self.command = (name, *PLAYER_FLAGS[name])
+                break
+        self.speech = japanese_voice(env)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.command or self.speech)
+
+    def stop(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+
+    def play(self, sound: Sound) -> None:
+        argv = ()
+        if sound.path and self.command:
+            argv = (*self.command, sound.path)
+        elif sound.text and self.speech:
+            argv = (*self.speech, sound.text)
+        if not argv:
+            return
+        self.stop()
+        try:
+            self.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            self.proc = None  # a player that won't start shouldn't end the session
 
 
 class Keys:
@@ -155,14 +241,18 @@ def wrap(line: str, width: int) -> list:
     return rows
 
 
-def show(keys: Keys, text: str, footer: str, allowed: tuple) -> str:
+def show(keys: Keys, text: str, footer: str, allowed: tuple, handlers: dict = None) -> str:
     """Draw a screen until a key in `allowed` is pressed. j/k scroll, so a card
-    taller than a small tmux pane can still be read in full."""
+    taller than a small tmux pane can still be read in full. Keys in `handlers`
+    act without ending the screen, the way replaying audio should."""
+    handlers = handlers or {}
     if not sys.stdout.isatty():
         print(f"{text}\n{footer}", flush=True)
         while True:
             key = keys.read()
-            if key in allowed:
+            if key in handlers:
+                handlers[key]()
+            elif key in allowed:
                 return key
     offset = 0
     while True:
@@ -182,6 +272,8 @@ def show(keys: Keys, text: str, footer: str, allowed: tuple) -> str:
             offset += 1
         elif key == "k" and offset:
             offset -= 1
+        elif key in handlers:
+            handlers[key]()
         elif key in allowed:
             return key
 
@@ -251,6 +343,27 @@ def card_back(col, card) -> str:
     return render_back(card.answer(), dict(zip(note.keys(), note.fields)), media_support())
 
 
+def card_sounds(col, card) -> list:
+    """What to play once the card is flipped: the deck's own recordings when they
+    have been downloaded, otherwise synthesised speech of the reading field.
+    The rendered answer only carries [anki:play:…] placeholders, so the file
+    names have to come from Anki's AV tags."""
+    downloaded = []
+    for tag in card.answer_av_tags():
+        name = getattr(tag, "filename", "")  # a TTSTag carries no file
+        if name and os.path.exists(os.path.join(MEDIA_DIR, name)):
+            downloaded.append(Sound(path=os.path.join(MEDIA_DIR, name)))
+    if downloaded:
+        return downloaded
+    note = col.get_note(card.nid)
+    for name, value in zip(note.keys(), note.fields):
+        if any(hint in name.lower() for hint in READING_FIELDS):
+            text = clean(value)
+            if text:
+                return [Sound(text=text)]
+    return []
+
+
 def undo_last(col, graded: list) -> bool:
     """Undo until the most recently graded card's reps drop: Anki may have
     stacked an undoable deck switch on top of the grade."""
@@ -265,7 +378,7 @@ def undo_last(col, graded: list) -> bool:
     return False
 
 
-def review(col, keys: Keys, batch, pinned_deck: bool, notice: str):
+def review(col, keys: Keys, player: Player, batch, pinned_deck: bool, notice: str):
     """Review until the user stops. Returns (grades kept, message for after exit)."""
     graded = []
     target = batch
@@ -304,8 +417,19 @@ def review(col, keys: Keys, batch, pinned_deck: bool, notice: str):
         labels = [label.translate(BIDI_MARKS) for label in labels]
         footer = (f"1 again {labels[0]}  2 hard {labels[1]}  3 good {labels[2]}  "
                   f"4 easy {labels[3]}  u undo  q quit")
-        key = show(keys, f"{header}\n\n{card_back(col, card)}", footer,
-                   (*RATINGS, *FLIP_KEYS, "u", "q"))
+        back = card_back(col, card)
+        cues = card_sounds(col, card) if player.enabled else []
+        handlers = {}
+        if cues:
+            # hearing the word is the point of flipping, so it plays unprompted
+            player.play(cues[0])
+            handlers["r"] = lambda: player.play(cues[0])
+            footer += "  r word" if len(cues) > 1 else "  r replay"
+            if len(cues) > 1:
+                handlers["s"] = lambda: player.play(cues[1])
+                footer += "  s sentence"
+        key = show(keys, f"{header}\n\n{back}", footer,
+                   (*RATINGS, *FLIP_KEYS, "u", "q"), handlers)
         if key == "q":
             return graded, ""
         if key == "u":
@@ -324,12 +448,14 @@ def session(args):
                     and not args.no_sync and os.path.exists(AUTH_PATH))
         notice = run_sync(keys) if can_sync else ""
         col = open_collection(args.deck)
+        player = Player(enabled=not args.no_audio)
         alt = sys.stdout.isatty()
         if alt:
             sys.stdout.write(ENTER_ALT_SCREEN)
         try:
-            graded, message = review(col, keys, batch, bool(args.deck), notice)
+            graded, message = review(col, keys, player, batch, bool(args.deck), notice)
         finally:
+            player.stop()  # nothing should still be talking after the session ends
             if alt:
                 sys.stdout.write(LEAVE_ALT_SCREEN)
                 sys.stdout.flush()
@@ -396,6 +522,7 @@ def main():
     ap.add_argument("count", nargs="?", type=int, default=10, help="cards per batch; 0 = no limit")
     ap.add_argument("--deck", default=None, help="pin the session to this deck")
     ap.add_argument("--no-sync", action="store_true", help="skip the automatic AnkiWeb sync")
+    ap.add_argument("--no-audio", action="store_true", help="stay silent on the card back")
     ap.add_argument("--stats", action="store_true", help="due counts per deck")
     ap.add_argument("--recent-fails", action="store_true", help="cards recently graded Again")
     ap.add_argument("--json", action="store_true", help="machine-readable --stats/--recent-fails")
