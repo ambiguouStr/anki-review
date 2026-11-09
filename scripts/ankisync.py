@@ -29,6 +29,7 @@ DATA_DIR = os.environ.get("ANKI_CLI_DIR") or os.path.expanduser("~/.local/share/
 COL_PATH = os.path.join(DATA_DIR, "collection.anki2")
 AUTH_PATH = os.path.join(DATA_DIR, ".ankiauth.json")
 STARTUP_GRACE = 2.0  # seconds to wait for a media sync to report itself active
+BIDI_MARKS = dict.fromkeys(range(0x2066, 0x206A))  # Anki's i18n wraps numbers in these
 
 
 def save_auth(auth: SyncAuth) -> None:
@@ -77,10 +78,12 @@ def sync_media(col: Collection, auth: SyncAuth) -> None:
                 running = True
             elif running or time.time() - started > STARTUP_GRACE:
                 break  # the backend syncs on its own thread and takes a moment to start
+            # these arrive already labelled and translated ("Checked: 1000"),
+            # wrapped in the bidi isolates Anki's i18n puts around numbers
             p = status.progress
-            if p.checked or p.added or p.removed:
-                print(f"\r  checked {p.checked}, added {p.added}, removed {p.removed}",
-                      end="", flush=True)
+            line = ", ".join(s.translate(BIDI_MARKS) for s in (p.checked, p.added, p.removed) if s)
+            if line:
+                print(f"\r  {line}", end="", flush=True)
             time.sleep(0.5)
     except KeyboardInterrupt:
         col.set_wants_abort()
