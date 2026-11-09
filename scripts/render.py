@@ -99,8 +99,14 @@ def pitch_text(html_text: str) -> str:
     return "・".join(readings)
 
 
+CLOZE = re.compile(r"\{\{c\d+::(.*?)(?:::[^}]*)?\}\}", re.S)
+
+
 def _squash(text: str) -> str:
-    """Comparable form: no furigana brackets, whitespace or line breaks."""
+    """Comparable form: no furigana brackets, whitespace or line breaks, and
+    cloze markup reduced to the text it hides — otherwise a cloze note's raw
+    Text field never matches the rendered answer and gets repeated below it."""
+    text = CLOZE.sub(r"\1", text)
     return re.sub(r"\s+", "", re.sub(r"\[[^\]]*\]", "", text))
 
 
