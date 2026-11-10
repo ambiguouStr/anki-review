@@ -61,6 +61,8 @@ LEAVE_ALT_SCREEN = "\x1b[?25h\x1b[?1049l"
 CLEAR = "\x1b[2J\x1b[H"
 DIM = "\x1b[2m"
 RESET = "\x1b[0m"
+UNDERLINE = "\x1b[4m"
+QUEUE_COLORS = ("\x1b[34m", "\x1b[31m", "\x1b[32m")  # new, learning, review: as in Anki
 
 # kitty, iTerm2, WezTerm and Ghostty speak an inline image protocol
 IMAGE_TERMINALS = ("kitty", "iterm.app", "wezterm", "ghostty")
@@ -228,9 +230,17 @@ class Keys:
 
 
 def wrap(line: str, width: int) -> list:
-    """Hard-wrap by display width; CJK characters take two columns."""
+    """Hard-wrap by display width; CJK characters take two columns and
+    colour escapes take none."""
     rows, row, used = [], "", 0
+    in_escape = False
     for ch in line:
+        if ch == "\x1b":
+            in_escape = True
+        if in_escape:
+            row += ch
+            in_escape = not ch.isalpha()  # an SGR sequence ends at its final letter
+            continue
         w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
         if used + w > width:
             rows.append(row)
@@ -319,9 +329,25 @@ def due_tree(col):
     return out
 
 
+class Counts(NamedTuple):
+    """Due counts as Anki's reviewer shows them; relearning is part of learning."""
+    new: int
+    learning: int
+    review: int
+
+    def render(self, current: int, color: bool) -> str:
+        """`new + learning + review`, coloured blue/red/green with the
+        current card's queue underlined, as in Anki's reviewer."""
+        if not color:
+            return " + ".join(map(str, self))
+        return " + ".join(
+            f"{QUEUE_COLORS[i]}{UNDERLINE if i == current else ''}{n}{RESET}"
+            for i, n in enumerate(self))
+
+
 def next_queued(col, pinned_deck: bool):
-    """Head of the current deck's queue; if empty and no deck is pinned,
-    switch to the next deck that still has due cards and retry once."""
+    """Head of the current deck's queue and its Counts; if empty and no deck is
+    pinned, switch to the next deck that still has due cards and retry once."""
     out = col.sched.get_queued_cards(fetch_limit=1)
     if not out.cards and not pinned_deck:
         for deck_id, _, _, new, learn, review in due_tree(col):
@@ -330,8 +356,8 @@ def next_queued(col, pinned_deck: bool):
                 out = col.sched.get_queued_cards(fetch_limit=1)
                 break
     if not out.cards:
-        return None, 0
-    return out.cards[0], out.new_count + out.learning_count + out.review_count
+        return None, Counts(0, 0, 0)
+    return out.cards[0], Counts(out.new_count, out.learning_count, out.review_count)
 
 
 def card_front(card) -> str:
@@ -399,7 +425,8 @@ def review(col, keys: Keys, player: Player, batch, pinned_deck: bool, notice: st
             return graded, "No more cards due."
         card = col.get_card(queued.card.id)
         card.start_timer()
-        header = f"{remaining} left · {col.decks.name(card.did)}"
+        counts = remaining.render(queued.queue, color=sys.stdout.isatty())
+        header = f"{counts} · {col.decks.name(card.did)}"
         if notice:
             header = f"{notice}\n{header}"
             notice = ""
@@ -459,7 +486,7 @@ def session(args):
             if alt:
                 sys.stdout.write(LEAVE_ALT_SCREEN)
                 sys.stdout.flush()
-            remaining = next_queued(col, bool(args.deck))[1]
+            remaining = sum(next_queued(col, bool(args.deck))[1])
             col.close()
         print(message or f"{len(graded)} graded, {remaining} left.")
         problem = run_sync(keys) if can_sync and graded else ""

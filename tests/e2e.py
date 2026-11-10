@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 from render import Media, clean, pitch_text, render_back  # noqa: E402
-from review import can_play_audio, japanese_voice, terminal_shows_images  # noqa: E402
+from review import can_play_audio, japanese_voice, terminal_shows_images, wrap  # noqa: E402
 
 REAL = os.environ.get("ANKI_CLI_DIR") or os.path.expanduser("~/.local/share/anki-cli")
 REAL_COL = os.path.join(REAL, "collection.anki2")
@@ -157,6 +157,8 @@ def test_render():
 
 
 def test_terminal_checks():
+    colored = "\x1b[34m12\x1b[0m + \x1b[31m\x1b[4m3\x1b[0m"
+    check("colour escapes take no width", wrap(colored, 6) == [colored], wrap(colored, 6))
     bin_dir = tempfile.mkdtemp(prefix="anki-review-bin-")
     mpv = os.path.join(bin_dir, "mpv")
     with open(mpv, "w") as f:
@@ -309,6 +311,10 @@ def test_review(box):
     check("terminal restored", restored)
     check("alt screen left", out.count("\x1b[?1049l") == 1)
     check("exit summary", "1 graded" in out, out[-200:])
+    counts = re.findall(r"\x1b\[34m(?:\x1b\[4m)?\d+\x1b\[0m \+ \x1b\[31m(?:\x1b\[4m)?\d+\x1b\[0m"
+                        r" \+ \x1b\[32m(?:\x1b\[4m)?\d+\x1b\[0m · ", out)
+    check("header shows new + learn + review in Anki colours", counts, out[:300])
+    check("current queue underlined", all(c.count("\x1b[4m") == 1 for c in counts), counts)
     r = json.loads(run("--recent-fails", "--json", box=box).stdout)
     check("failed card is listed", r["cards"] and r["cards"][0]["card_id"] == log[-1][0], r)
 
