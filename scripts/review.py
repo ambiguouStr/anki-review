@@ -15,8 +15,9 @@ Usage:
 Keys:
   space/enter  flip, then grade Good
   1/2/3/4      Again / Hard / Good / Easy
+  5            suspend the card (front or back; u brings it back)
   r/s          replay the word / play the sentence, when the back has audio
-  u            undo the previous grade (any time)
+  u            undo the previous grade or suspension (any time)
   j/k          scroll, when the card is taller than the window
   q            quit
 """
@@ -37,6 +38,7 @@ from typing import NamedTuple
 from anki.collection import Collection  # must come first: anki.cards alone hits a circular import
 from anki.decks import DeckId
 from anki.errors import DBError
+from anki.consts import QUEUE_TYPE_SUSPENDED
 from anki.scheduler.v3 import CardAnswer
 
 from render import Media, clean, render_back
@@ -54,6 +56,7 @@ RATINGS = {
     "4": CardAnswer.EASY,
 }
 FLIP_KEYS = (" ", "\n", "\r")
+SUSPEND_KEY = "5"
 BIDI_MARKS = dict.fromkeys(range(0x2066, 0x206A))  # Anki's i18n wraps numbers in these
 
 ENTER_ALT_SCREEN = "\x1b[?1049h\x1b[?25l"
@@ -391,22 +394,25 @@ def card_sounds(col, card) -> list:
     return []
 
 
-def undo_last(col, graded: list) -> bool:
-    """Undo until the most recently graded card's reps drop: Anki may have
-    stacked an undoable deck switch on top of the grade."""
-    if not graded:
+def undo_last(col, done: list) -> bool:
+    """Undo until the most recent action is gone: a grade is gone when the
+    card's reps drop, a suspension when the card leaves the suspended queue.
+    Anki may have stacked an undoable deck switch on top of either."""
+    if not done:
         return False
-    card_id = graded.pop()
+    card_id, suspended = done.pop()
     reps = col.get_card(card_id).reps
     while col.undo_status().undo:
         col.undo()
-        if col.get_card(card_id).reps < reps:
+        card = col.get_card(card_id)
+        if (card.queue != QUEUE_TYPE_SUSPENDED) if suspended else (card.reps < reps):
             return True
     return False
 
 
 def review(col, keys: Keys, player: Player, batch, pinned_deck: bool, notice: str):
-    """Review until the user stops. Returns (grades kept, message for after exit)."""
+    """Review until the user stops. Returns (actions kept as (card id, was a
+    suspension), message for after exit)."""
     graded = []
     target = batch
     while True:
@@ -433,19 +439,23 @@ def review(col, keys: Keys, player: Player, batch, pinned_deck: bool, notice: st
             header = f"{notice}\n{header}"
             notice = ""
 
-        key = show(keys, f"{header}\n\n{card_front(card, emphasis=color)}", "space flip  u undo  q quit",
-                   (*FLIP_KEYS, "u", "q"))
+        key = show(keys, f"{header}\n\n{card_front(card, emphasis=color)}",
+                   "space flip  5 suspend  u undo  q quit", (*FLIP_KEYS, SUSPEND_KEY, "u", "q"))
         if key == "q":
             return graded, ""
         if key == "u":
             if not undo_last(col, graded):
                 notice = "nothing to undo"
             continue
+        if key == SUSPEND_KEY:
+            col.sched.suspend_cards([card.id])
+            graded.append((card.id, True))
+            continue
 
         labels = col.sched.describe_next_states(queued.states)
         labels = [label.translate(BIDI_MARKS) for label in labels]
         footer = (f"1 again {labels[0]}  2 hard {labels[1]}  3 good {labels[2]}  "
-                  f"4 easy {labels[3]}  u undo  q quit")
+                  f"4 easy {labels[3]}  5 suspend  u undo  q quit")
         back = card_back(col, card, emphasis=color)
         cues = card_sounds(col, card) if player.enabled else []
         handlers = {}
@@ -458,16 +468,20 @@ def review(col, keys: Keys, player: Player, batch, pinned_deck: bool, notice: st
                 handlers["s"] = lambda: player.play(cues[1])
                 footer += "  s sentence"
         key = show(keys, f"{header}\n\n{back}", footer,
-                   (*RATINGS, *FLIP_KEYS, "u", "q"), handlers)
+                   (*RATINGS, *FLIP_KEYS, SUSPEND_KEY, "u", "q"), handlers)
         if key == "q":
             return graded, ""
         if key == "u":
             if not undo_last(col, graded):
                 notice = "nothing to undo"
             continue
+        if key == SUSPEND_KEY:
+            col.sched.suspend_cards([card.id])
+            graded.append((card.id, True))
+            continue
         rating = RATINGS.get(key, CardAnswer.GOOD)  # space/enter means Good, as in Anki
         col.sched.answer_card(col.sched.build_answer(card=card, states=queued.states, rating=rating))
-        graded.append(card.id)
+        graded.append((card.id, False))
 
 
 def session(args):
@@ -490,7 +504,11 @@ def session(args):
                 sys.stdout.flush()
             remaining = sum(next_queued(col, bool(args.deck))[1])
             col.close()
-        print(message or f"{len(graded)} graded, {remaining} left.")
+        suspended = sum(s for _, s in graded)
+        summary = f"{len(graded) - suspended} graded, "
+        if suspended:
+            summary += f"{suspended} suspended, "
+        print(message or f"{summary}{remaining} left.")
         problem = run_sync(keys) if can_sync and graded else ""
         if problem:
             print(f"{problem}; grades are saved locally.")

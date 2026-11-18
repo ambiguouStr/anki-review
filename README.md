@@ -64,8 +64,9 @@ ank --recent-fails     # cards you pressed Again on in the past two days
 | --- | --- |
 | `space` / `enter` | flip, then grade Good |
 | `1` `2` `3` `4` | Again / Hard / Good / Easy |
+| `5` | suspend the card, from the front or the back |
 | `r` / `s` | replay the word / play the sentence, when the back has audio |
-| `u` | undo the previous grade, at any point in the session |
+| `u` | undo the previous grade or suspension, at any point in the session |
 | `j` / `k` | scroll a card taller than the window |
 | `q` | quit |
 

@@ -103,6 +103,14 @@ def revlog(box):
         db.close()
 
 
+def suspended(box):
+    db = sqlite3.connect(os.path.join(box, "collection.anki2"))
+    try:
+        return {cid for (cid,) in db.execute("select id from cards where queue = -1")}
+    finally:
+        db.close()
+
+
 def fresh(box):
     shutil.copy(REAL_COL, box)
     return revlog(box)
@@ -334,6 +342,16 @@ def test_review(box):
     check("u on the next front undoes", code == 0 and revlog(box) == base, len(revlog(box)) - len(base))
     check("undo refuses when empty",
           "nothing to undo" in tty_session([("u", 0.1), ("q", 0.3)], "--no-sync", box=box)[1])
+
+    base = fresh(box)
+    before = suspended(box)
+    code, out, _ = tty_session([("5", 0.2), (" ", 0.2), ("5", 0.2), ("q", 0.2)], "--no-sync", box=box)
+    check("5 suspends from the front and the back, without grading",
+          code == 0 and len(suspended(box)) == len(before) + 2 and revlog(box) == base, out[-200:])
+    check("exit summary counts suspensions", "0 graded, 2 suspended" in out, out[-200:])
+    fresh(box)
+    code, out, _ = tty_session([("5", 0.2), ("u", 0.3), ("q", 0.2)], "--no-sync", box=box)
+    check("u brings a suspended card back", code == 0 and suspended(box) == before, out[-200:])
 
     base = fresh(box)
     code, out, _ = tty_session([(" ", 0.1), ("3", 0.2), (" ", 0.1), ("3", 0.2), ("q", 0.2)],
