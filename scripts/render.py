@@ -31,8 +31,15 @@ def _ruby(html_text: str, mode: str) -> str:
     return RUBY_RUN.sub(merge, re.sub(r"</?rp>", "", html_text))
 
 
-def clean(html_text: str, ruby: str = "both", media: Media = Media()) -> str:
-    """Plain text from card HTML. ruby: "both" | "base" | "reading"."""
+EMPHASIS_ON = "\x1b[1;38;2;129;216;208m"  # bold #81D8D0, so the tested word stands out
+EMPHASIS_OFF = "\x1b[0m"
+
+
+def clean(html_text: str, ruby: str = "both", media: Media = Media(),
+          emphasis: bool = False) -> str:
+    """Plain text from card HTML. ruby: "both" | "base" | "reading".
+    emphasis keeps <b>/<strong> visible as bold colour: sentence decks mark the
+    word being tested that way, and without it the front is just a sentence."""
     def sound(m):
         return f"[audio: {m.group(1)}]" if media.audio(m.group(1)) else ""
 
@@ -49,6 +56,11 @@ def clean(html_text: str, ruby: str = "both", media: Media = Media()) -> str:
     t = re.sub(r"""<img[^>]*src\s*=\s*["']?([^"'\s>]+)["']?[^>]*>""", image, t)
     t = re.sub(r"<br\s*/?>", "\n", t)
     t = re.sub(r"</?(div|p|li|tr)[^>]*>", "\n", t)
+    if emphasis:
+        t = re.sub(r"<(b|strong)(\s[^>]*)?>", EMPHASIS_ON, t, flags=re.I)
+        t = re.sub(r"</(b|strong)\s*>", EMPHASIS_OFF, t, flags=re.I)
+        if t.count(EMPHASIS_ON) > t.count(EMPHASIS_OFF):
+            t += EMPHASIS_OFF  # an unclosed <b> must not colour the footer
     t = re.sub(r"<[^>]+>", "", t)
     t = t.replace("<!--", "").replace("-->", "")
     t = html.unescape(t)
@@ -110,10 +122,11 @@ def _squash(text: str) -> str:
     return re.sub(r"\s+", "", re.sub(r"\[[^\]]*\]", "", text))
 
 
-def render_back(answer_html: str, fields: dict, media: Media = Media()) -> str:
+def render_back(answer_html: str, fields: dict, media: Media = Media(),
+                emphasis: bool = False) -> str:
     """The rendered answer, plus every note field the card template left out
     (templates commonly hide pitch accent, frequency and so on)."""
-    back = clean(answer_html, media=media)
+    back = clean(answer_html, media=media)  # plain, for the comparisons below
     shown = (_squash(clean(answer_html, "base", media)) + "\n"
              + _squash(clean(answer_html, "reading", media)))
     extras = []
@@ -122,4 +135,6 @@ def render_back(answer_html: str, fields: dict, media: Media = Media()) -> str:
         squashed = _squash(text)  # empty for a lone [image: x] or [audio: x] marker
         if text and text not in back and (not squashed or squashed not in shown):
             extras.append(f"{name}: {text}")
+    if emphasis:
+        back = clean(answer_html, media=media, emphasis=True)
     return "\n".join([back, *extras]) if extras else back

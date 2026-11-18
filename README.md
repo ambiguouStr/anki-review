@@ -69,7 +69,7 @@ ank --recent-fails     # cards you pressed Again on in the past two days
 | `j` / `k` | scroll a card taller than the window |
 | `q` | quit |
 
-The back always shows everything on the note, including fields the card template hides, such as pitch accent (`ア↗ナ↘タ (起伏)`) and frequency.
+Bold text on a card (sentence decks use it for the word being tested) is shown in bold `#81D8D0` on a terminal. The back always shows everything on the note, including fields the card template hides, such as pitch accent (`ア↗ナ↘タ (起伏)`) and frequency.
 
 ### Sound
 

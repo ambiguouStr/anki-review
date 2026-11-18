@@ -360,13 +360,14 @@ def next_queued(col, pinned_deck: bool):
     return out.cards[0], Counts(out.new_count, out.learning_count, out.review_count)
 
 
-def card_front(card) -> str:
-    return clean(card.question(), media=media_support())
+def card_front(card, emphasis: bool = False) -> str:
+    return clean(card.question(), media=media_support(), emphasis=emphasis)
 
 
-def card_back(col, card) -> str:
+def card_back(col, card, emphasis: bool = False) -> str:
     note = col.get_note(card.nid)
-    return render_back(card.answer(), dict(zip(note.keys(), note.fields)), media_support())
+    return render_back(card.answer(), dict(zip(note.keys(), note.fields)), media_support(),
+                       emphasis=emphasis)
 
 
 def card_sounds(col, card) -> list:
@@ -425,13 +426,14 @@ def review(col, keys: Keys, player: Player, batch, pinned_deck: bool, notice: st
             return graded, "No more cards due."
         card = col.get_card(queued.card.id)
         card.start_timer()
-        counts = remaining.render(queued.queue, color=sys.stdout.isatty())
+        color = sys.stdout.isatty()
+        counts = remaining.render(queued.queue, color=color)
         header = f"{counts} · {col.decks.name(card.did)}"
         if notice:
             header = f"{notice}\n{header}"
             notice = ""
 
-        key = show(keys, f"{header}\n\n{card_front(card)}", "space flip  u undo  q quit",
+        key = show(keys, f"{header}\n\n{card_front(card, emphasis=color)}", "space flip  u undo  q quit",
                    (*FLIP_KEYS, "u", "q"))
         if key == "q":
             return graded, ""
@@ -444,7 +446,7 @@ def review(col, keys: Keys, player: Player, batch, pinned_deck: bool, notice: st
         labels = [label.translate(BIDI_MARKS) for label in labels]
         footer = (f"1 again {labels[0]}  2 hard {labels[1]}  3 good {labels[2]}  "
                   f"4 easy {labels[3]}  u undo  q quit")
-        back = card_back(col, card)
+        back = card_back(col, card, emphasis=color)
         cues = card_sounds(col, card) if player.enabled else []
         handlers = {}
         if cues:

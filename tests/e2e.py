@@ -152,6 +152,13 @@ def test_render():
         "彼は医者として働いている。",
         {"Text": "彼は医者{{c1::として::role}}働いている。"})
         == "彼は医者として働いている。")
+    check("target word kept as bold colour on a terminal",
+          clean("<b>身内</b>に<strong class='x'>医者</strong>", emphasis=True)
+          == "\x1b[1;38;2;129;216;208m身内\x1b[0mに\x1b[1;38;2;129;216;208m医者\x1b[0m")
+    check("bold dropped when not on a terminal", clean("<b>身内</b>に") == "身内に")
+    check("emphasis doesn't make the back repeat its fields", render_back(
+        "<div><b>身内</b>に医者がいる。</div>", {"SentKanji": "<b>身内</b>に医者がいる。"}, emphasis=True)
+        == "\x1b[1;38;2;129;216;208m身内\x1b[0mに医者がいる。")
     check("back adds only what the template hid",
           back == "父(ちち)\nfather\nFrequency: 681\nPitch Accent: チ↗チ↘ (起伏)", back)
 
