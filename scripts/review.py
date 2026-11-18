@@ -41,7 +41,7 @@ from anki.errors import DBError
 from anki.consts import QUEUE_TYPE_SUSPENDED
 from anki.scheduler.v3 import CardAnswer
 
-from render import Media, clean, render_back
+from render import Media, clean, reading, render_back
 
 DATA_DIR = os.environ.get("ANKI_CLI_DIR") or os.path.expanduser("~/.local/share/anki-cli")
 COL_PATH = os.path.join(DATA_DIR, "collection.anki2")
@@ -388,7 +388,7 @@ def card_sounds(col, card) -> list:
     note = col.get_note(card.nid)
     for name, value in zip(note.keys(), note.fields):
         if any(hint in name.lower() for hint in READING_FIELDS):
-            text = clean(value)
+            text = reading(value)
             if text:
                 return [Sound(text=text)]
     return []

@@ -31,6 +31,16 @@ def _ruby(html_text: str, mode: str) -> str:
     return RUBY_RUN.sub(merge, re.sub(r"</?rp>", "", html_text))
 
 
+BRACKET_FURIGANA = re.compile(r" ?[^ \[\]\n]+\[([^\]\[;]*)(?:;[^\]]*)?\]")
+
+
+def reading(html_text: str) -> str:
+    """Kana only, for a speech engine: ruby and Anki's bracket furigana
+    (３日[みっか] 前[まえ]に) both give way to their readings. Fed kanji, the
+    engine would guess the very reading the card is testing."""
+    return BRACKET_FURIGANA.sub(r"\1", clean(html_text, ruby="reading"))
+
+
 EMPHASIS_ON = "\x1b[1;38;2;129;216;208m"  # bold #81D8D0, so the tested word stands out
 EMPHASIS_OFF = "\x1b[0m"
 

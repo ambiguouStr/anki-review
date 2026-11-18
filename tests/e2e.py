@@ -23,12 +23,13 @@ import sys
 import tempfile
 import termios
 import time
+from urllib.parse import unquote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
-from render import Media, clean, pitch_text, render_back  # noqa: E402
-from review import can_play_audio, japanese_voice, terminal_shows_images, wrap  # noqa: E402
+from render import Media, clean, pitch_text, reading, render_back  # noqa: E402
+from review import can_play_audio, japanese_voice, next_queued, terminal_shows_images, wrap  # noqa: E402
 
 REAL = os.environ.get("ANKI_CLI_DIR") or os.path.expanduser("~/.local/share/anki-cli")
 REAL_COL = os.path.join(REAL, "collection.anki2")
@@ -89,7 +90,12 @@ def tty_session(steps, *args, box, scripts=SCRIPTS, rows=40, cols=80, env=None):
     pump(0.1)
     if proc.poll() is None:
         proc.kill()
-    restored = termios.tcgetattr(slave) == before
+    after = termios.tcgetattr(slave)
+    # PENDIN is set by the kernel, not by review.py, when the tty goes back to
+    # canonical mode with input still queued (macOS does this); it isn't a setting
+    after[3] &= ~getattr(termios, "PENDIN", 0)
+    before[3] &= ~getattr(termios, "PENDIN", 0)
+    restored = after == before
     os.close(master)
     os.close(slave)
     return proc.returncode, out.decode(errors="replace"), restored
@@ -111,6 +117,18 @@ def suspended(box):
         db.close()
 
 
+def first_note(box):
+    """Fields of the card a session on this copy starts with, so media checks
+    can follow whatever deck happens to be first instead of assuming one."""
+    from anki.collection import Collection
+    col = Collection(os.path.join(box, "collection.anki2"))
+    try:
+        card, _ = next_queued(col, False)
+        return "\x1f".join(col.get_note(card.card.note_id).fields) if card else ""
+    finally:
+        col.close()
+
+
 def fresh(box):
     shutil.copy(REAL_COL, box)
     return revlog(box)
@@ -128,6 +146,10 @@ def stub_scripts(body):
 
 
 def test_render():
+    check("speech gets kana only",
+          reading("３日[みっか] 前[まえ]に 喧嘩[けんか]して") == "みっかまえにけんかして"
+          and reading("<ruby>面<rt>おも</rt></ruby><ruby>白<rt>しろ</rt></ruby>い") == "おもしろい"
+          and reading("食[た;h]べる") == "たべる")
     check("ruby merges into one word",
           clean("<ruby><rb>面</rb><rt>おも</rt></ruby><ruby><rb>白</rb><rt>しろ</rt></ruby>い") == "面白(おもしろ)い")
     check("markup stripped",
@@ -256,7 +278,7 @@ def test_audio(box):
     _, out, _ = tty_session(flip, "--no-sync", box=box, env=env)
     lines = played(log)
     check("recordings play through the audio player",
-          lines and lines[0].startswith("mpv ") and lines[0].endswith(".mp3"), lines)
+          lines and lines[0].startswith("mpv ") and media in lines[0], lines)
     check("recordings beat speech", not any(line.startswith("say ") for line in lines), lines)
     check("word and sentence both offered", "r word" in out and "s sentence" in out, out[-300:])
 
@@ -303,11 +325,13 @@ def test_media_on_screen(box):
     os.makedirs(media, exist_ok=True)
     db = sqlite3.connect(os.path.join(box, "collection.anki2"))
     for (fields,) in db.execute("select flds from notes"):
-        for name in re.findall(r'src="([^"]+)"|\[sound:([^\]]+)\]', fields):
-            open(os.path.join(media, name[0] or name[1]), "w").close()
+        for name in re.findall(r"""src=["']?([^"'\s>]+)|\[sound:([^\]]+)\]""", fields):
+            open(os.path.join(media, unquote(name[0]) or name[1]), "w").close()
     db.close()
+    has_image = "<img" in first_note(box)
     _, out, _ = tty_session(steps, "--no-sync", box=box, env=capable)
-    check("capable terminal, local files: shown", "[image:" in out and "[audio:" in out, out[-400:])
+    check("capable terminal, local files: shown",
+          "[audio:" in out and ("[image:" in out) == has_image, out[-400:])
     shutil.rmtree(media)
     shutil.rmtree(bin_dir)
 
@@ -366,8 +390,8 @@ def test_review(box):
     code, out, _ = tty_session([(" ", 0.1), ("j", 0.2), ("j", 0.1), ("q", 0.2)], "--no-sync", box=box, rows=4)
     left = [int(n) for n in re.findall(r"scroll \((\d+) more\)", out)]
     check("tiny window scrolls", len(left) >= 2 and left[-1] == left[-2] - 1, left)
-    check("scrolling reaches the last line", "Frequency:" in tty_session(
-        [(" ", 0.1)] + [("j", 0.05)] * 24 + [("q", 0.2)], "--no-sync", box=box, rows=6, cols=40)[1])
+    check("scrolling reaches the last line", "scroll (0 more)" in tty_session(
+        [(" ", 0.1)] + [("j", 0.03)] * 60 + [("q", 0.2)], "--no-sync", box=box, rows=6, cols=40)[1])
 
     r = run("--no-sync", box=box, stdin=" 3q")
     check("piped keys work", r.returncode == 0 and "Traceback" not in r.stderr, r.stderr[-200:])
@@ -430,7 +454,10 @@ def test_cli_edges(box, empty):
 
     link = os.path.join(empty, "ank")
     os.symlink(os.path.join(SCRIPTS, "review.py"), link)
-    r = subprocess.run([link, "--stats"], capture_output=True, text=True, env=env_for(box), timeout=60)
+    # the shebang finds python3 on PATH; put the one with anki installed first
+    path = os.path.dirname(sys.executable) + os.pathsep + os.environ["PATH"]
+    r = subprocess.run([link, "--stats"], capture_output=True, text=True,
+                       env=env_for(box, {"PATH": path}), timeout=60)
     check("runs through a symlink", r.returncode == 0, r.stderr[-300:])
     check("script is executable", os.stat(os.path.join(SCRIPTS, "review.py")).st_mode & stat.S_IXUSR)
 
